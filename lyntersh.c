@@ -447,11 +447,11 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                           "  --warning                Mostrar el diálogo de advertencia\n"
                                           "  --text-info              Mostrar el diálogo de texto de información\n\n"
                                           "Configuraciones de la aplicación:\n"
-                                          "  --title=\"TÍTULO\"          Título de la ventana\n"
-                                          "  --icon=\"RUTA\"             Icono de ventana (PNG)\n"
-                                          "  --wm-class=\"CLASE\"       Clase WM\n"
-                                          "  --color=\"COLOR\"           Color de botones (green, red, blue, orange, purple o #RRGGBB)\n"
-                                          "  --theme=\"dark|light\"      Tema visual (por defecto light)\n");
+                                          "  --title \"TÍTULO\"         Título de la ventana\n"
+                                          "  --icon \"RUTA\"            Icono de ventana (PNG)\n"
+                                          "  --wm-class \"CLASE\"       Clase WM\n"
+                                          "  --color \"COLOR\"          Color de botones (green, red, blue, orange, purple o #RRGGBB)\n"
+                                          "  --theme \"dark|light\"     Tema visual (por defecto light)\n");
                                           return 0;
                                       }
                                       else if (!strcmp(argv[i], "--help-theme")) {
@@ -463,7 +463,7 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                           return 0;
                                       }
                                   }
-                                  if (d.type == -1) { fprintf(stderr, "Falta tipo de diálogo\n"); return 1; }
+                                  if (d.type == -1) { fprintf(stderr, "Lyntesh: una interramienta de GUI simple para scripts.\n\nEscribe lyntersh --help para recibir ayuda.\n\nCopyright (C) 2026, Lynds Corp.\nMIT License: ¡Es de código abierto!\n\nEscrito por David Baña Szymaniak.\n\n¡Espero que te guste!\n"); return 1; }
                                   if (!d.text && d.type != DIALOG_TEXT_INFO) d.text = "";
 
                                   d.dpy = XOpenDisplay(NULL);
