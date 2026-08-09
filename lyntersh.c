@@ -1,6 +1,6 @@
 /*
- * Lyntersh - Zenity moderno con Xlib pura, cursores contextuales, título/icono personalizado
- * Compilar: gcc -o lyntersh lyntersh.c -lX11 -lm -O2
+ * Lyntersh - Zenity moderno con Xlib pura, PNG, título, clase WM y color personalizable
+ * Compilar: gcc -o lyntersh lyntersh.c -lX11 -lpng -lm -O2
 */
 
 #include <X11/Xlib.h>
@@ -13,16 +13,13 @@
 #include <string.h>
 #include <math.h>
 #include <unistd.h>
+#include <png.h>
 
 #define BUF_SIZE 1024
 #define MAX_LINES 500
 
-/* Paleta verde */
+/* Colores base de la interfaz (no botones) */
 #define CLR_BG       0xE8E8E8
-#define CLR_BTN      0x4CAF50
-#define CLR_BTN_HOV  0x66BB6A
-#define CLR_BTN_PRS  0x388E3C
-#define CLR_BTN_TXT  0xFFFFFF
 #define CLR_ENTRY_BG 0xFFFFFF
 #define CLR_TEXT     0x000000
 #define CLR_SCROLL   0xB0B0B0
@@ -50,9 +47,12 @@ typedef struct {
     DialogType type;
     char *title, *text, *filename;
     char *icon_path;
+    char *wm_class;
+    /* Colores de botones (personalizables) */
+    unsigned long btn_normal, btn_hover, btn_press;
     char entry_buf[BUF_SIZE];
     int entry_cursor, entry_len;
-    int done, result;
+    int done, result;   /* 0 = OK/Yes, 1 = Cancel/No */
     Button btn_ok, btn_cancel, btn_yes, btn_no;
     int entry_x, entry_y, entry_w, entry_h;
     char **lines;
@@ -60,12 +60,11 @@ typedef struct {
     int scrollbar_x, scrollbar_w;
     double scrollbar_h, scrollbar_y;
     Cursor cur_hand, cur_xterm, current_cursor;
-    /* icono */
     Pixmap icon_pixmap;
     Pixmap icon_mask;
 } Dialog;
 
-/* Fuente moderna */
+/* ---------- Fuente ---------- */
 static XFontStruct* load_nice_font(Display *dpy) {
     const char *fonts[] = {
         "-*-helvetica-*-r-*-*-11-*-*-*-*-*-*-*",
@@ -81,7 +80,7 @@ static XFontStruct* load_nice_font(Display *dpy) {
     return NULL;
 }
 
-/* Rectángulo redondeado */
+/* ---------- Dibujo ---------- */
 static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                               int r, unsigned long color, int fill) {
     XSetForeground(d->dpy, d->gc, color);
@@ -107,9 +106,9 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                               static void draw_button_bg(Dialog *d, Button *b) {
                                   int r = 6;
                                   unsigned long col_top, col_bot;
-                                  if (b->pressed)      { col_top = CLR_BTN_PRS; col_bot = CLR_BTN_PRS; }
-                                  else if (b->hover)   { col_top = CLR_BTN_HOV; col_bot = CLR_BTN;   }
-                                  else                 { col_top = CLR_BTN;     col_bot = CLR_BTN;   }
+                                  if (b->pressed)      { col_top = d->btn_press; col_bot = d->btn_press; }
+                                  else if (b->hover)   { col_top = d->btn_hover; col_bot = d->btn_normal; }
+                                  else                 { col_top = d->btn_normal; col_bot = d->btn_normal; }
 
                                   draw_rounded_rect(d, b->x, b->y, b->w, b->h, r, col_top, 1);
                                   if (!b->pressed && b->hover) {
@@ -128,7 +127,7 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
 
                               static void draw_button(Dialog *d, Button *b) {
                                   draw_button_bg(d, b);
-                                  XSetForeground(d->dpy, d->gc, CLR_BTN_TXT);
+                                  XSetForeground(d->dpy, d->gc, 0xFFFFFF);  /* texto blanco */
                                   int tw = XTextWidth(d->font, b->label, strlen(b->label));
                                   int tx = b->x + (b->w - tw)/2;
                                   int ty = b->y + (b->h + d->font->ascent - d->font->descent)/2;
@@ -139,7 +138,6 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   int r = 5;
                                   draw_rounded_rect(d, d->entry_x, d->entry_y, d->entry_w, d->entry_h, r, CLR_ENTRY_BG, 1);
                                   draw_rounded_rect(d, d->entry_x, d->entry_y, d->entry_w, d->entry_h, r, 0x888888, 0);
-
                                   XSetForeground(d->dpy, d->gc, CLR_TEXT);
                                   if (d->entry_len > 0) {
                                       int ty = d->entry_y + (d->entry_h + d->font->ascent - d->font->descent)/2;
@@ -266,86 +264,143 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   return x >= b->x && x <= b->x+b->w && y >= b->y && y <= b->y+b->h;
                               }
 
-                              /* Cargar icono desde un archivo PPM binario (P6) */
-                              static void load_window_icon(Dialog *d, const char *path) {
-                                  FILE *fp = fopen(path, "rb");
-                                  if (!fp) {
-                                      fprintf(stderr, "No se pudo abrir el icono '%s'\n", path);
-                                      return;
-                                  }
-                                  char magic[3];
-                                  if (!fgets(magic, sizeof(magic), fp) || strncmp(magic, "P6", 2)) {
-                                      fprintf(stderr, "El icono debe ser un PPM binario (P6)\n");
-                                      fclose(fp);
-                                      return;
-                                  }
-                                  /* Saltar comentarios */
-                                  int c = getc(fp);
-                                  while (c == '#') {
-                                      while (getc(fp) != '\n');
-                                      c = getc(fp);
-                                  }
-                                  ungetc(c, fp);
-                                  int w, h, maxval;
-                                  if (fscanf(fp, "%d %d %d", &w, &h, &maxval) != 3 || maxval != 255) {
-                                      fprintf(stderr, "Formato PPM inválido\n");
-                                      fclose(fp);
-                                      return;
-                                  }
-                                  fgetc(fp); /* el espacio/blanco después del maxval */
+                              /* ---------- Colores de botones ---------- */
+                              static unsigned long adjust_brightness(unsigned long rgb, double factor) {
+                                  int r = (rgb >> 16) & 0xFF;
+                                  int g = (rgb >> 8) & 0xFF;
+                                  int b = rgb & 0xFF;
+                                  r = (int)(r * factor); if (r > 255) r = 255; if (r < 0) r = 0;
+                                  g = (int)(g * factor); if (g > 255) g = 255; if (g < 0) g = 0;
+                                  b = (int)(b * factor); if (b > 255) b = 255; if (b < 0) b = 0;
+                                  return (r << 16) | (g << 8) | b;
+                              }
 
-                                  unsigned char *data = malloc(w * h * 3);
-                                  if (fread(data, 3, w * h, fp) != (size_t)(w * h)) {
-                                      fprintf(stderr, "Error al leer los datos del icono\n");
-                                      free(data);
-                                      fclose(fp);
-                                      return;
-                                  }
-                                  fclose(fp);
+                              static int parse_hex_color(const char *hex, unsigned long *rgb) {
+                                  if (strlen(hex) != 7 || hex[0] != '#') return 0;
+                                  char *end;
+                                  unsigned long val = strtoul(hex+1, &end, 16);
+                                  if (*end != '\0') return 0;
+                                  *rgb = val;
+                                  return 1;
+                              }
 
-                                  /* Crear imagen X */
-                                  Visual *vis = DefaultVisual(d->dpy, d->screen);
-                                  XImage *ximg = XCreateImage(d->dpy, vis, DefaultDepth(d->dpy, d->screen),
-                                                              ZPixmap, 0, NULL, w, h, 32, 0);
-                                  if (!ximg) {
-                                      free(data);
-                                      return;
-                                  }
-                                  ximg->data = malloc(ximg->bytes_per_line * h);
-                                  /* Convertir RGB a formato de pixel de 32 bits */
-                                  for (int y = 0; y < h; y++) {
-                                      for (int x = 0; x < w; x++) {
-                                          unsigned char *src = data + (y * w + x) * 3;
-                                          unsigned char r = src[0], g = src[1], b = src[2];
-                                          unsigned long pixel = (r << 16) | (g << 8) | b;
-                                          XPutPixel(ximg, x, y, pixel);
+                              static void set_button_colors(Dialog *d, const char *spec) {
+                                  if (strcmp(spec, "green") == 0) {
+                                      d->btn_normal = 0x4CAF50; d->btn_hover = 0x66BB6A; d->btn_press = 0x388E3C;
+                                  } else if (strcmp(spec, "red") == 0) {
+                                      d->btn_normal = 0xF44336; d->btn_hover = 0xEF5350; d->btn_press = 0xD32F2F;
+                                  } else if (strcmp(spec, "blue") == 0) {
+                                      d->btn_normal = 0x2196F3; d->btn_hover = 0x42A5F5; d->btn_press = 0x1976D2;
+                                  } else if (strcmp(spec, "orange") == 0) {
+                                      d->btn_normal = 0xFF9800; d->btn_hover = 0xFFA726; d->btn_press = 0xF57C00;
+                                  } else if (strcmp(spec, "purple") == 0) {
+                                      d->btn_normal = 0x9C27B0; d->btn_hover = 0xAB47BC; d->btn_press = 0x7B1FA2;
+                                  } else if (spec[0] == '#') {
+                                      unsigned long rgb;
+                                      if (parse_hex_color(spec, &rgb)) {
+                                          d->btn_normal = rgb;
+                                          d->btn_hover  = adjust_brightness(rgb, 1.2);
+                                          d->btn_press  = adjust_brightness(rgb, 0.8);
                                       }
                                   }
-                                  free(data);
+                              }
 
-                                  /* Crear pixmap y máscara */
-                                  GC gc_icon = XCreateGC(d->dpy, d->win, 0, NULL);
-                                  d->icon_pixmap = XCreatePixmap(d->dpy, d->win, w, h, DefaultDepth(d->dpy, d->screen));
-                                  XPutImage(d->dpy, d->icon_pixmap, gc_icon, ximg, 0, 0, 0, 0, w, h);
-                                  d->icon_mask = XCreatePixmap(d->dpy, d->win, w, h, 1);
-                                  /* máscara: todo opaco */
-                                  XSetForeground(d->dpy, gc_icon, 1);
-                                  XFillRectangle(d->dpy, d->icon_mask, gc_icon, 0, 0, w, h);
+                              /* ---------- Icono PNG con libpng ---------- */
+                              static unsigned char* load_png_rgba(const char *filename, int *w, int *h) {
+                                  FILE *fp = fopen(filename, "rb");
+                                  if (!fp) return NULL;
+                                  png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+                                  if (!png) { fclose(fp); return NULL; }
+                                  png_infop info = png_create_info_struct(png);
+                                  if (!info) { png_destroy_read_struct(&png, NULL, NULL); fclose(fp); return NULL; }
+                                  if (setjmp(png_jmpbuf(png))) {
+                                      png_destroy_read_struct(&png, &info, NULL);
+                                      fclose(fp);
+                                      return NULL;
+                                  }
+                                  png_init_io(png, fp);
+                                  png_read_info(png, info);
+                                  *w = png_get_image_width(png, info);
+                                  *h = png_get_image_height(png, info);
+                                  png_byte color_type = png_get_color_type(png, info);
+                                  png_byte bit_depth  = png_get_bit_depth(png, info);
 
-                                  /* Establecer icono mediante _NET_WM_ICON (más moderno) */
-                                  Atom net_wm_icon = XInternAtom(d->dpy, "_NET_WM_ICON", False);
-                                  Atom cardinal = XInternAtom(d->dpy, "CARDINAL", False);
+                                  if (bit_depth == 16) png_set_strip_16(png);
+                                  if (color_type == PNG_COLOR_TYPE_PALETTE) png_set_palette_to_rgb(png);
+                                  if (color_type == PNG_COLOR_TYPE_GRAY && bit_depth < 8) png_set_expand_gray_1_2_4_to_8(png);
+                                  if (png_get_valid(png, info, PNG_INFO_tRNS)) png_set_tRNS_to_alpha(png);
+                                  if (color_type == PNG_COLOR_TYPE_RGB || color_type == PNG_COLOR_TYPE_GRAY ||
+                                      color_type == PNG_COLOR_TYPE_PALETTE) {
+                                      png_set_filler(png, 0xFF, PNG_FILLER_AFTER);
+                                      }
+
+                                      png_read_update_info(png, info);
+                                  int rowbytes = png_get_rowbytes(png, info);
+                                  unsigned char *data = malloc(rowbytes * (*h));
+                                  png_bytep *row_pointers = malloc(sizeof(png_bytep) * (*h));
+                                  for (int y = 0; y < *h; y++)
+                                      row_pointers[y] = data + y * rowbytes;
+                                  png_read_image(png, row_pointers);
+                                  png_destroy_read_struct(&png, &info, NULL);
+                                  free(row_pointers);
+                                  fclose(fp);
+                                  return data;
+                              }
+
+                              static void load_icon(Dialog *d, const char *path) {
+                                  int w, h;
+                                  unsigned char *rgba = load_png_rgba(path, &w, &h);
+                                  if (!rgba) {
+                                      fprintf(stderr, "No se pudo cargar el icono PNG '%s'\n", path);
+                                      return;
+                                  }
+
+                                  int screen_depth = DefaultDepth(d->dpy, d->screen);
+                                  Visual *vis = DefaultVisual(d->dpy, d->screen);
+
+                                  /* 1) Pixmap para el hint clásico (solo RGB) */
+                                  XImage *ximg = XCreateImage(d->dpy, vis, screen_depth, ZPixmap, 0, NULL, w, h, 32, 0);
+                                  if (!ximg) { free(rgba); return; }
+                                  ximg->data = malloc(ximg->bytes_per_line * h);
+
+                                  /* 2) Array para _NET_WM_ICON (ARGB) */
                                   unsigned long *icon_data = malloc((2 + w * h) * sizeof(unsigned long));
                                   icon_data[0] = w;
                                   icon_data[1] = h;
-                                  for (int y = 0; y < h; y++)
-                                      for (int x = 0; x < w; x++)
-                                          icon_data[2 + y*w + x] = XGetPixel(ximg, x, y);
+
+                                  for (int y = 0; y < h; y++) {
+                                      for (int x = 0; x < w; x++) {
+                                          unsigned char *p = rgba + (y * w + x) * 4;
+                                          unsigned char r = p[0], g = p[1], b = p[2], a = p[3];
+                                          /* XImage (solo RGB) */
+                                          unsigned long pixel_rgb = (r << 16) | (g << 8) | b;
+                                          XPutPixel(ximg, x, y, pixel_rgb);
+                                          /* _NET_WM_ICON (ARGB: AARRGGBB) */
+                                          icon_data[2 + y*w + x] = (a << 24) | (r << 16) | (g << 8) | b;
+                                      }
+                                  }
+                                  free(rgba);
+
+                                  /* Pixmap del icono (profundidad de pantalla) */
+                                  GC gc = XCreateGC(d->dpy, d->win, 0, NULL);
+                                  d->icon_pixmap = XCreatePixmap(d->dpy, d->win, w, h, screen_depth);
+                                  XPutImage(d->dpy, d->icon_pixmap, gc, ximg, 0, 0, 0, 0, w, h);
+
+                                  /* Máscara (1 bit): todo opaco */
+                                  d->icon_mask = XCreatePixmap(d->dpy, d->win, w, h, 1);
+                                  GC gc_mask = XCreateGC(d->dpy, d->icon_mask, 0, NULL);
+                                  XSetForeground(d->dpy, gc_mask, 1);
+                                  XFillRectangle(d->dpy, d->icon_mask, gc_mask, 0, 0, w, h);
+                                  XFreeGC(d->dpy, gc_mask);
+
+                                  /* Propiedad moderna _NET_WM_ICON */
+                                  Atom net_wm_icon = XInternAtom(d->dpy, "_NET_WM_ICON", False);
+                                  Atom cardinal = XInternAtom(d->dpy, "CARDINAL", False);
                                   XChangeProperty(d->dpy, d->win, net_wm_icon, cardinal, 32,
                                                   PropModeReplace, (unsigned char*)icon_data, 2 + w*h);
                                   free(icon_data);
 
-                                  /* También ponemos el icono clásico con XSetWMHints */
+                                  /* Hint clásico */
                                   XWMHints *wmhints = XAllocWMHints();
                                   if (wmhints) {
                                       wmhints->icon_pixmap = d->icon_pixmap;
@@ -356,7 +411,7 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   }
 
                                   XDestroyImage(ximg);
-                                  XFreeGC(d->dpy, gc_icon);
+                                  XFreeGC(d->dpy, gc);
                               }
 
                               int main(int argc, char *argv[]) {
@@ -364,10 +419,13 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   memset(&d, 0, sizeof(d));
                                   d.type = -1;
                                   d.title = "Lyntersh";
+                                  d.wm_class = "lyntersh";
                                   d.icon_path = NULL;
-                                  d.icon_pixmap = None;
-                                  d.icon_mask = None;
                                   d.result = 1;
+                                  /* Colores por defecto: verde */
+                                  d.btn_normal = 0x4CAF50;
+                                  d.btn_hover  = 0x66BB6A;
+                                  d.btn_press  = 0x388E3C;
 
                                   for (int i = 1; i < argc; i++) {
                                       if (!strcmp(argv[i], "--entry")) d.type = DIALOG_ENTRY;
@@ -378,8 +436,9 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                       else if (!strcmp(argv[i], "--text-info")) d.type = DIALOG_TEXT_INFO;
                                       else if (!strcmp(argv[i], "--text") && i+1<argc) d.text = argv[++i];
                                       else if (!strcmp(argv[i], "--title") && i+1<argc) d.title = argv[++i];
-                                      else if (!strcmp(argv[i], "--window-name") && i+1<argc) d.title = argv[++i];
-                                      else if (!strcmp(argv[i], "--window-icon") && i+1<argc) d.icon_path = argv[++i];
+                                      else if (!strcmp(argv[i], "--icon") && i+1<argc) d.icon_path = argv[++i];
+                                      else if (!strcmp(argv[i], "--wm-class") && i+1<argc) d.wm_class = argv[++i];
+                                      else if (!strcmp(argv[i], "--color") && i+1<argc) set_button_colors(&d, argv[++i]);
                                       else if (!strcmp(argv[i], "--entry-text") && i+1<argc) {
                                           strncpy(d.entry_buf, argv[++i], BUF_SIZE-1);
                                           d.entry_len = strlen(d.entry_buf);
@@ -404,8 +463,10 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                           "  --question               Mostrar el diálogo de pregunta\n"
                                           "  --warning                Mostrar el diálogo de advertencia\n"
                                           "  --text-info              Mostrar el diálogo de texto de información\n"
-                                          "  --window-name=\"NOMBRE\"   Título de la ventana\n"
-                                          "  --window-icon=\"RUTA\"     Icono de ventana (PPM binario P6)\n");
+                                          "  --title=\"TÍTULO\"          Título de la ventana\n"
+                                          "  --icon=\"RUTA\"             Icono de ventana (PNG)\n"
+                                          "  --wm-class=\"CLASE\"       Clase WM (por defecto 'lyntersh')\n"
+                                          "  --color=\"COLOR\"           Color de botones (green, red, blue, orange, purple o #RRGGBB)\n");
                                           return 0;
                                       }
                                       else if (!strncmp(argv[i], "--help-", 7)) {
@@ -439,18 +500,22 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   d.win = XCreateSimpleWindow(d.dpy, RootWindow(d.dpy, d.screen),
                                                               0, 0, d.width, d.height, 1, d.black, CLR_BG);
                                   XStoreName(d.dpy, d.win, d.title);
+
+                                  /* WM_CLASS */
+                                  XClassHint class_hint = {0};
+                                  class_hint.res_name = d.wm_class;
+                                  class_hint.res_class = d.wm_class;
+                                  XSetClassHint(d.dpy, d.win, &class_hint);
+
                                   XSelectInput(d.dpy, d.win, ExposureMask | ButtonPressMask | ButtonReleaseMask |
                                   KeyPressMask | PointerMotionMask | StructureNotifyMask);
 
-                                  /* Cursores */
                                   d.cur_hand   = XCreateFontCursor(d.dpy, XC_hand2);
                                   d.cur_xterm  = XCreateFontCursor(d.dpy, XC_xterm);
                                   d.current_cursor = None;
                                   XDefineCursor(d.dpy, d.win, None);
 
-                                  /* Cargar icono si se especificó */
-                                  if (d.icon_path)
-                                      load_window_icon(&d, d.icon_path);
+                                  if (d.icon_path) load_icon(&d, d.icon_path);
 
                                   XMapWindow(d.dpy, d.win);
 
@@ -599,7 +664,6 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   if (d.type == DIALOG_ENTRY && d.result == 0)
                                       printf("%s\n", d.entry_buf);
 
-                                  /* Limpieza */
                                   if (d.icon_pixmap != None) XFreePixmap(d.dpy, d.icon_pixmap);
                                   if (d.icon_mask != None) XFreePixmap(d.dpy, d.icon_mask);
                                   XFreeCursor(d.dpy, d.cur_hand);
