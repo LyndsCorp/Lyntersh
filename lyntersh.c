@@ -1,7 +1,8 @@
 /*
  * Lyntersh - Zenity moderno con Xlib, Xft (UTF-8), temas, icono PNG y colores
  * Compilar: gcc -o lyntersh lyntersh.c $(pkg-config --cflags --libs xft fontconfig freetype2) -lX11 -lpng -lm -O2
- */
+*/
+
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
