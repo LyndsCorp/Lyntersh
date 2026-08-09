@@ -407,7 +407,10 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   d.btn_normal = 0x4CAF50; d.btn_hover = 0x66BB6A; d.btn_press = 0x388E3C;
 
                                   for (int i = 1; i < argc; i++) {
-                                      if (!strcmp(argv[i], "--entry")) d.type = DIALOG_ENTRY;
+                                      if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-v")) {
+                                          printf("1.0\n");
+                                          return 0;
+                                      } else if (!strcmp(argv[i], "--entry")) d.type = DIALOG_ENTRY;
                                       else if (!strcmp(argv[i], "--error")) d.type = DIALOG_ERROR;
                                       else if (!strcmp(argv[i], "--info")) d.type = DIALOG_INFO;
                                       else if (!strcmp(argv[i], "--question")) d.type = DIALOG_QUESTION;
