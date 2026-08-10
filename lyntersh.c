@@ -498,7 +498,7 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
 
                                   for (int i = 1; i < argc; i++) {
                                       if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-v")) {
-                                          printf("1.4\n");
+                                          printf("1.1\n");
                                           return 0;
                                       } else if (!strcmp(argv[i], "--entry")) d.type = DIALOG_ENTRY;
                                       else if (!strcmp(argv[i], "--error")) d.type = DIALOG_ERROR;
