@@ -1,6 +1,9 @@
 /*
- * Lyntersh - Zenity moderno con Xlib, Xft (UTF-8), temas, icono PNG y colores
+ * Lyntersh - Algo parecido a Zenity pero más ligero y limitado, con Xlib, Xft (UTF-8), temas, icono PNG y colores
  * Compilar: gcc -o lyntersh lyntersh.c $(pkg-config --cflags --libs xft fontconfig freetype2) -lX11 -lpng -lm -O2
+ * Copyright (C) Lynds Corp.
+ * Escrito por David Baña Szymaniak
+ * MIT License
 */
 
 #include <X11/Xlib.h>
@@ -9,20 +12,24 @@
 #include <X11/cursorfont.h>
 #include <X11/Xatom.h>
 #include <X11/Xft/Xft.h>
+#include <X11/Xlocale.h>
 #include <fontconfig/fontconfig.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <unistd.h>
+#include <locale.h>
 #include <png.h>
 
 #define BUF_SIZE 1024
 #define MAX_LINES 500
+#define MAX_OPTIONS 100
 
 typedef enum {
     DIALOG_ENTRY, DIALOG_ERROR, DIALOG_INFO,
-    DIALOG_QUESTION, DIALOG_WARNING, DIALOG_TEXT_INFO
+    DIALOG_QUESTION, DIALOG_WARNING, DIALOG_TEXT_INFO,
+    DIALOG_CHOICE
 } DialogType;
 
 typedef enum { THEME_LIGHT, THEME_DARK } Theme;
@@ -50,6 +57,7 @@ typedef struct {
     Theme theme;
     XftColor clr_bg, clr_text, clr_entry_bg, clr_entry_border;
     XftColor clr_scroll_bg, clr_scroll_thumb;
+    XftColor clr_highlight, clr_selected_text;
     char entry_buf[BUF_SIZE];
     int entry_cursor, entry_len;
     int done, result;
@@ -64,6 +72,14 @@ typedef struct {
     XftFont *xft_font;
     XftDraw *xft_draw;
     GC gc;
+    /* choice specific */
+    char **options;
+    int num_options;
+    int choice_selected;
+    int text_height_pixels;   /* altura del texto del diálogo choice */
+    /* XIM / XIC para entrada UTF-8 */
+    XIM xim;
+    XIC xic;
 } Dialog;
 
 /* ---------- Asignar color Xft ---------- */
@@ -78,12 +94,15 @@ static void set_xft_color(XftColor *c, unsigned long rgb) {
 /* ---------- Aplicar tema ---------- */
 static void apply_theme(Dialog *d) {
     unsigned long bg, text, entry_bg, entry_border, scroll_bg, scroll_thumb;
+    unsigned long highlight, selected_text;
     if (d->theme == THEME_LIGHT) {
         bg = 0xE8E8E8; text = 0x000000; entry_bg = 0xFFFFFF;
         entry_border = 0x888888; scroll_bg = 0xCCCCCC; scroll_thumb = 0xB0B0B0;
+        highlight = 0x2196F3; selected_text = 0xFFFFFF;
     } else {
         bg = 0x2E2E2E; text = 0xFFFFFF; entry_bg = 0x3C3C3C;
         entry_border = 0x555555; scroll_bg = 0x555555; scroll_thumb = 0x888888;
+        highlight = 0x1565C0; selected_text = 0xFFFFFF;
     }
     set_xft_color(&d->clr_bg, bg);
     set_xft_color(&d->clr_text, text);
@@ -91,6 +110,8 @@ static void apply_theme(Dialog *d) {
     set_xft_color(&d->clr_entry_border, entry_border);
     set_xft_color(&d->clr_scroll_bg, scroll_bg);
     set_xft_color(&d->clr_scroll_thumb, scroll_thumb);
+    set_xft_color(&d->clr_highlight, highlight);
+    set_xft_color(&d->clr_selected_text, selected_text);
 }
 
 /* ---------- Cargar fuente con Xft ---------- */
@@ -306,13 +327,15 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   XSetForeground(d->dpy, d->gc, d->clr_bg.pixel);
                                   XFillRectangle(d->dpy, d->win, d->gc, 0, 0, d->width, d->height);
 
+                                  int text_y_start = d->xft_font->ascent + 12;
+                                  int text_height = 0;
                                   if (d->text && strlen(d->text) > 0) {
-                                      int y = d->xft_font->ascent + 12;
                                       char *dup = strdup(d->text);
                                       char *line = strtok(dup, "\n");
                                       while (line) {
-                                          XftDrawStringUtf8(d->xft_draw, &d->clr_text, d->xft_font, 15, y, (const FcChar8*)line, strlen(line));
-                                          y += d->xft_font->ascent + d->xft_font->descent + 4;
+                                          XftDrawStringUtf8(d->xft_draw, &d->clr_text, d->xft_font, 15, text_y_start + text_height,
+                                                            (const FcChar8*)line, strlen(line));
+                                          text_height += d->xft_font->ascent + d->xft_font->descent + 4;
                                           line = strtok(NULL, "\n");
                                       }
                                       free(dup);
@@ -329,7 +352,7 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                           draw_button(d, &d->btn_yes);
                                           draw_button(d, &d->btn_no);
                                       } else if (d->type == DIALOG_TEXT_INFO) {
-                                          int area_x = 12, area_y = d->xft_font->ascent + 20;
+                                          int area_x = 12, area_y = text_y_start + text_height + 10;
                                           int area_w = d->width - 24 - 16;
                                           int area_h = d->height - area_y - 45;
                                           int line_h = d->xft_font->ascent + d->xft_font->descent + 2;
@@ -356,12 +379,54 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                               draw_rounded_rect(d, d->scrollbar_x, (int)thumb_y, d->scrollbar_w, (int)thumb_h, 4, d->clr_scroll_thumb.pixel, 1);
                                           }
                                           draw_button(d, &d->btn_ok);
+                                      } else if (d->type == DIALOG_CHOICE) {
+                                          int area_x = 12;
+                                          int area_y = text_y_start + text_height + 15;
+                                          int area_w = d->width - 24 - 24;
+                                          int line_h = d->xft_font->ascent + d->xft_font->descent + 4;
+                                          int area_h = d->height - area_y - 45;
+                                          int max_lines = area_h / line_h;
+                                          int start = d->scroll_y;
+
+                                          for (int i = 0; i < max_lines && (i+start) < d->num_options; i++) {
+                                              int y = area_y + i * line_h;
+                                              if (i+start == d->choice_selected) {
+                                                  XSetForeground(d->dpy, d->gc, d->clr_highlight.pixel);
+                                                  XFillRectangle(d->dpy, d->win, d->gc, area_x, y, area_w, line_h);
+                                                  XftDrawStringUtf8(d->xft_draw, &d->clr_selected_text, d->xft_font,
+                                                                    area_x+4, y + d->xft_font->ascent,
+                                                                    (const FcChar8*)d->options[i+start],
+                                                                    strlen(d->options[i+start]));
+                                              } else {
+                                                  XftDrawStringUtf8(d->xft_draw, &d->clr_text, d->xft_font,
+                                                                    area_x+4, y + d->xft_font->ascent,
+                                                                    (const FcChar8*)d->options[i+start],
+                                                                    strlen(d->options[i+start]));
+                                              }
+                                          }
+
+                                          if (d->num_options > max_lines) {
+                                              d->scrollbar_x = area_x + area_w + 4;
+                                              d->scrollbar_w = 8;
+                                              double thumb_h = (double)max_lines / d->num_options * area_h;
+                                              if (thumb_h < 10) thumb_h = 10;
+                                              double range = area_h - thumb_h;
+                                              double p = (double)d->scroll_y / (d->num_options - max_lines);
+                                              int thumb_y = area_y + (int)(p * range);
+                                              XSetForeground(d->dpy, d->gc, d->clr_scroll_bg.pixel);
+                                              XFillRectangle(d->dpy, d->win, d->gc, d->scrollbar_x, area_y, d->scrollbar_w, area_h);
+                                              draw_rounded_rect(d, d->scrollbar_x, thumb_y, d->scrollbar_w, (int)thumb_h, 4,
+                                                                d->clr_scroll_thumb.pixel, 1);
+                                          }
+
+                                          draw_button(d, &d->btn_ok);
+                                          draw_button(d, &d->btn_cancel);
                                       }
                               }
 
                               static void init_buttons(Dialog *d) {
                                   int bw = 80, bh = 28, margin = 15;
-                                  if (d->type == DIALOG_ENTRY || d->type == DIALOG_TEXT_INFO) {
+                                  if (d->type == DIALOG_ENTRY || d->type == DIALOG_TEXT_INFO || d->type == DIALOG_CHOICE) {
                                       d->btn_ok.x = d->width - 2*bw - 30; d->btn_ok.y = d->height - bh - margin;
                                       d->btn_ok.w = bw; d->btn_ok.h = bh; d->btn_ok.label = "OK";
                                       d->btn_cancel.x = d->width - bw - margin; d->btn_cancel.y = d->height - bh - margin;
@@ -397,7 +462,28 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   return x >= b->x && x <= b->x+b->w && y >= b->y && y <= b->y+b->h;
                               }
 
+                              /* ---- Calcular dimensiones para el diálogo de elección ---- */
+                              static void calc_choice_dimensions(Dialog *d) {
+                                  int max_vis = 10;
+                                  int line_h = d->xft_font->ascent + d->xft_font->descent + 4;
+                                  int text_height = 0;
+                                  if (d->text) {
+                                      char *dup = strdup(d->text);
+                                      char *line = strtok(dup, "\n");
+                                      while (line) { text_height += line_h; line = strtok(NULL, "\n"); }
+                                      free(dup);
+                                  }
+                                  d->text_height_pixels = text_height;
+                                  int vis_lines = (d->num_options < max_vis) ? d->num_options : max_vis;
+                                  int option_area_h = vis_lines * line_h;
+                                  d->width = 400;
+                                  d->height = d->xft_font->ascent + 12 + text_height + 15 + option_area_h + 45 + 20;
+                                  if (d->height < 150) d->height = 150;
+                                  if (d->width < 300) d->width = 300;
+                              }
+
                               int main(int argc, char *argv[]) {
+                                  setlocale(LC_ALL, "");   /* necesario para XIM y entrada UTF-8 */
                                   Dialog d;
                                   memset(&d, 0, sizeof(d));
                                   d.type = -1;
@@ -405,10 +491,14 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   d.wm_class = "lyntersh";
                                   d.theme = THEME_LIGHT;
                                   d.btn_normal = 0x4CAF50; d.btn_hover = 0x66BB6A; d.btn_press = 0x388E3C;
+                                  d.text_height_pixels = 0;
+
+                                  char **choice_opts = NULL;
+                                  int num_choice = 0;
 
                                   for (int i = 1; i < argc; i++) {
                                       if (!strcmp(argv[i], "--version") || !strcmp(argv[i], "-v")) {
-                                          printf("1.0\n");
+                                          printf("1.4\n");
                                           return 0;
                                       } else if (!strcmp(argv[i], "--entry")) d.type = DIALOG_ENTRY;
                                       else if (!strcmp(argv[i], "--error")) d.type = DIALOG_ERROR;
@@ -416,6 +506,7 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                       else if (!strcmp(argv[i], "--question")) d.type = DIALOG_QUESTION;
                                       else if (!strcmp(argv[i], "--warning")) d.type = DIALOG_WARNING;
                                       else if (!strcmp(argv[i], "--text-info")) d.type = DIALOG_TEXT_INFO;
+                                      else if (!strcmp(argv[i], "--choice")) d.type = DIALOG_CHOICE;
                                       else if (!strcmp(argv[i], "--text") && i+1<argc) d.text = argv[++i];
                                       else if (!strcmp(argv[i], "--title") && i+1<argc) d.title = argv[++i];
                                       else if (!strcmp(argv[i], "--icon") && i+1<argc) d.icon_path = argv[++i];
@@ -431,6 +522,12 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                           d.entry_len = strlen(d.entry_buf); d.entry_cursor = d.entry_len;
                                       }
                                       else if (!strcmp(argv[i], "--filename") && i+1<argc) d.filename = argv[++i];
+                                      else if (!strcmp(argv[i], "--option") && i+1<argc) {
+                                          if (num_choice < MAX_OPTIONS) {
+                                              choice_opts = realloc(choice_opts, (num_choice+1)*sizeof(char*));
+                                              choice_opts[num_choice++] = strdup(argv[++i]);
+                                          }
+                                      }
                                       else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
                                           printf("Uso:\n  lyntersh [OPCIÓN…]\n\n"
                                           "Opciones de ayuda:\n"
@@ -442,6 +539,7 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                           "  --help-info              Mostrar las opciones de información\n"
                                           "  --help-warning           Mostrar las opciones de advertencia\n"
                                           "  --help-text-info         Mostrar opciones del texto de información\n"
+                                          "  --help-choice            Mostrar opciones del diálogo de elección\n"
                                           "  --help-theme             Mostrar opciones de tema\n\n"
                                           "Opciones de la aplicación:\n"
                                           "  --entry                  Mostrar el diálogo de entrada de texto\n"
@@ -449,13 +547,15 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                           "  --info                   Mostrar el diálogo de información\n"
                                           "  --question               Mostrar el diálogo de pregunta\n"
                                           "  --warning                Mostrar el diálogo de advertencia\n"
-                                          "  --text-info              Mostrar el diálogo de texto de información\n\n"
+                                          "  --text-info              Mostrar el diálogo de texto de información\n"
+                                          "  --choice                 Mostrar un diálogo de selección entre opciones\n\n"
                                           "Configuraciones de la aplicación:\n"
                                           "  --title \"TÍTULO\"         Título de la ventana\n"
                                           "  --icon \"RUTA\"            Icono de ventana (PNG)\n"
                                           "  --wm-class \"CLASE\"       Clase WM\n"
                                           "  --color \"COLOR\"          Color de botones (green, red, blue, orange, purple o #RRGGBB)\n"
-                                          "  --theme \"dark|light\"     Tema visual (por defecto light)\n");
+                                          "  --theme \"dark|light\"     Tema visual (por defecto light)\n"
+                                          "  --option \"TEXTO\"         Añade una opción al diálogo --choice\n");
                                           return 0;
                                       }
                                       else if (!strcmp(argv[i], "--help-theme")) {
@@ -467,8 +567,16 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                           return 0;
                                       }
                                   }
-                                  if (d.type == -1) { fprintf(stderr, "Lyntesh: una interramienta de GUI simple para scripts.\n\nEscribe lyntersh --help para recibir ayuda.\n\nCopyright (C) 2026, Lynds Corp.\nMIT License: ¡Es de código abierto!\n\nEscrito por David Baña Szymaniak.\n\n¡Espero que te guste!\n"); return 1; }
-                                  if (!d.text && d.type != DIALOG_TEXT_INFO) d.text = "";
+
+                                  if (d.type == -1) {
+                                      fprintf(stderr, "Lyntesh: una interramienta de GUI simple para scripts.\n\nEscribe lyntersh --help para recibir ayuda.\n\nCopyright (C) 2026, Lynds Corp.\nMIT License: ¡Es de código abierto!\n\nEscrito por David Baña Szymaniak.\n\n¡Espero que te guste!\n");
+                                      return 1;
+                                  }
+                                  if (d.type == DIALOG_CHOICE && num_choice == 0) {
+                                      fprintf(stderr, "lyntersh: --choice necesita al menos una opción (--option)\n");
+                                      return 1;
+                                  }
+                                  if (!d.text && d.type != DIALOG_TEXT_INFO && d.type != DIALOG_CHOICE) d.text = "";
 
                                   d.dpy = XOpenDisplay(NULL);
                                   if (!d.dpy) { fprintf(stderr, "No se pudo conectar a X11\n"); return 1; }
@@ -484,13 +592,21 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
 
                                   apply_theme(&d);
 
+                                  if (d.type == DIALOG_CHOICE) {
+                                      d.options = choice_opts;
+                                      d.num_options = num_choice;
+                                      d.choice_selected = 0;
+                                      calc_choice_dimensions(&d);
+                                  }
+
                                   switch (d.type) {
-                                      case DIALOG_ENTRY:       d.width = 420; d.height = 180; break;
+                                      case DIALOG_ENTRY:       if (!d.width) d.width = 420; if (!d.height) d.height = 180; break;
                                       case DIALOG_ERROR:
                                       case DIALOG_INFO:
                                       case DIALOG_WARNING:     d.width = 360; d.height = 140; break;
                                       case DIALOG_QUESTION:    d.width = 380; d.height = 150; break;
                                       case DIALOG_TEXT_INFO:   d.width = 620; d.height = 420; break;
+                                      case DIALOG_CHOICE:      break;
                                       default: d.width = 300; d.height = 120;
                                   }
 
@@ -512,6 +628,22 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   XDefineCursor(d.dpy, d.win, None);
 
                                   if (d.icon_path) load_icon(&d, d.icon_path);
+
+                                  /* Crear XIM y XIC para entrada UTF-8 */
+                                  d.xim = XOpenIM(d.dpy, NULL, NULL, NULL);
+                                  if (!d.xim) {
+                                      fprintf(stderr, "No se pudo abrir XIM\n");
+                                      return 1;
+                                  }
+                                  d.xic = XCreateIC(d.xim,
+                                                    XNInputStyle, XIMPreeditNothing | XIMStatusNothing,
+                                                    XNClientWindow, d.win,
+                                                    XNFocusWindow, d.win,
+                                                    NULL);
+                                  if (!d.xic) {
+                                      fprintf(stderr, "No se pudo crear XIC\n");
+                                      return 1;
+                                  }
 
                                   XMapWindow(d.dpy, d.win);
                                   d.xft_draw = XftDrawCreate(d.dpy, d.win, d.vis, d.cmap);
@@ -535,7 +667,7 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                           case MotionNotify: {
                                               int mx = ev.xmotion.x, my = ev.xmotion.y;
                                               int hov_ok = inside(&d.btn_ok, mx, my);
-                                              int hov_cancel = (d.type==DIALOG_ENTRY||d.type==DIALOG_TEXT_INFO) && inside(&d.btn_cancel, mx, my);
+                                              int hov_cancel = (d.type==DIALOG_ENTRY||d.type==DIALOG_TEXT_INFO||d.type==DIALOG_CHOICE) && inside(&d.btn_cancel, mx, my);
                                               int hov_yes = (d.type==DIALOG_QUESTION) && inside(&d.btn_yes, mx, my);
                                               int hov_no  = (d.type==DIALOG_QUESTION) && inside(&d.btn_no, mx, my);
                                               int need_redraw = 0;
@@ -561,6 +693,14 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                                   if (hov_ok) desired = d.cur_hand;
                                               } else if (d.type == DIALOG_QUESTION) {
                                                   if (hov_yes || hov_no) desired = d.cur_hand;
+                                              } else if (d.type == DIALOG_CHOICE) {
+                                                  if (hov_ok || hov_cancel) desired = d.cur_hand;
+                                                  else {
+                                                      int area_y = d.xft_font->ascent + 12 + d.text_height_pixels + 15;
+                                                      int area_h = d.height - area_y - 45;
+                                                      if (mx >= 12 && mx <= d.width-24-24 && my >= area_y && my <= area_y+area_h)
+                                                          desired = d.cur_hand;
+                                                  }
                                               }
 
                                               if (desired != d.current_cursor) { XDefineCursor(d.dpy, d.win, desired); d.current_cursor = desired; }
@@ -569,21 +709,48 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                           }
                                           case ButtonPress: {
                                               int x = ev.xbutton.x, y = ev.xbutton.y;
-                                              if (ev.xbutton.button == 4 && d.type == DIALOG_TEXT_INFO) {
-                                                  if (d.scroll_y > 0) { d.scroll_y--; redraw(&d); }
-                                              } else if (ev.xbutton.button == 5 && d.type == DIALOG_TEXT_INFO) {
-                                                  int max = d.nlines - (d.height - d.xft_font->ascent - 65) / (d.xft_font->ascent + d.xft_font->descent + 2);
-                                                  if (d.scroll_y < max) { d.scroll_y++; redraw(&d); }
+                                              if (ev.xbutton.button == 4) {
+                                                  if (d.type == DIALOG_TEXT_INFO) {
+                                                      if (d.scroll_y > 0) { d.scroll_y--; redraw(&d); }
+                                                  } else if (d.type == DIALOG_CHOICE) {
+                                                      if (d.scroll_y > 0) { d.scroll_y--; redraw(&d); }
+                                                  }
+                                              } else if (ev.xbutton.button == 5) {
+                                                  if (d.type == DIALOG_TEXT_INFO) {
+                                                      int max = d.nlines - (d.height - d.xft_font->ascent - 65) / (d.xft_font->ascent + d.xft_font->descent + 2);
+                                                      if (d.scroll_y < max) { d.scroll_y++; redraw(&d); }
+                                                  } else if (d.type == DIALOG_CHOICE) {
+                                                      int line_h = d.xft_font->ascent + d.xft_font->descent + 4;
+                                                      int area_y = d.xft_font->ascent + 12 + d.text_height_pixels + 15;
+                                                      int max_lines = (d.height - area_y - 45) / line_h;
+                                                      int max_scroll = d.num_options - max_lines;
+                                                      if (max_scroll > 0 && d.scroll_y < max_scroll) { d.scroll_y++; redraw(&d); }
+                                                  }
                                               } else if (ev.xbutton.button == 1) {
                                                   Button *target = NULL;
                                                   if (inside(&d.btn_ok, x, y)) target = &d.btn_ok;
-                                                  else if (d.type==DIALOG_ENTRY||d.type==DIALOG_TEXT_INFO) {
+                                                  else if (d.type==DIALOG_ENTRY||d.type==DIALOG_TEXT_INFO||d.type==DIALOG_CHOICE) {
                                                       if (inside(&d.btn_cancel, x, y)) target = &d.btn_cancel;
                                                   } else if (d.type==DIALOG_QUESTION) {
                                                       if (inside(&d.btn_yes, x, y)) target = &d.btn_yes;
                                                       else if (inside(&d.btn_no, x, y)) target = &d.btn_no;
                                                   }
-                                                  if (target) { target->pressed = 1; pressed_btn = target; redraw(&d); }
+
+                                                  if (target) {
+                                                      target->pressed = 1; pressed_btn = target; redraw(&d);
+                                                  } else if (d.type == DIALOG_CHOICE) {
+                                                      int area_x = 12;
+                                                      int area_y = d.xft_font->ascent + 12 + d.text_height_pixels + 15;
+                                                      int line_h = d.xft_font->ascent + d.xft_font->descent + 4;
+                                                      if (y >= area_y && x >= area_x && x <= area_x + (d.width - 48)) {
+                                                          int rel_y = y - area_y;
+                                                          int idx = d.scroll_y + rel_y / line_h;
+                                                          if (idx >= 0 && idx < d.num_options) {
+                                                              d.choice_selected = idx;
+                                                              redraw(&d);
+                                                          }
+                                                      }
+                                                  }
                                               }
                                               break;
                                           }
@@ -592,7 +759,10 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                                   pressed_btn->pressed = 0;
                                                   int x = ev.xbutton.x, y = ev.xbutton.y;
                                                   if (inside(pressed_btn, x, y)) {
-                                                      if (pressed_btn == &d.btn_ok)        { d.done=1; d.result=0; }
+                                                      if (pressed_btn == &d.btn_ok) {
+                                                          if (d.type == DIALOG_CHOICE) { d.done=1; d.result=0; }
+                                                          else { d.done=1; d.result=0; }
+                                                      }
                                                       else if (pressed_btn == &d.btn_cancel || pressed_btn == &d.btn_no) { d.done=1; d.result=1; }
                                                       else if (pressed_btn == &d.btn_yes)  { d.done=1; d.result=0; }
                                                   }
@@ -601,9 +771,11 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                               break;
                                           }
                                           case KeyPress: {
-                                              char buf[8] = {0};
+                                              if (XFilterEvent(&ev, d.win)) break;
+
+                                              char buf[32] = {0};  /* suficiente para cualquier carácter UTF-8 */
                                               KeySym ks;
-                                              int len = XLookupString(&ev.xkey, buf, sizeof(buf), &ks, NULL);
+                                              int len = Xutf8LookupString(d.xic, &ev.xkey, buf, sizeof(buf), &ks, NULL);
                                               if (d.type == DIALOG_ENTRY) {
                                                   if (ks == XK_Return || ks == XK_KP_Enter) { d.done=1; d.result=0; }
                                                   else if (ks == XK_BackSpace) {
@@ -648,6 +820,25 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                                       if (d.scroll_y < max) d.scroll_y++;
                                                       redraw(&d);
                                                   }
+                                              } else if (d.type == DIALOG_CHOICE) {
+                                                  if (ks == XK_Return || ks == XK_KP_Enter) {
+                                                      d.done = 1; d.result = 0;
+                                                  } else if (ks == XK_Up) {
+                                                      if (d.choice_selected > 0) {
+                                                          d.choice_selected--;
+                                                          if (d.choice_selected < d.scroll_y) d.scroll_y = d.choice_selected;
+                                                          redraw(&d);
+                                                      }
+                                                  } else if (ks == XK_Down) {
+                                                      if (d.choice_selected < d.num_options - 1) {
+                                                          d.choice_selected++;
+                                                          int line_h = d.xft_font->ascent + d.xft_font->descent + 4;
+                                                          int area_y = d.xft_font->ascent + 12 + d.text_height_pixels + 15;
+                                                          int max_lines = (d.height - area_y - 45) / line_h;
+                                                          if (d.choice_selected >= d.scroll_y + max_lines) d.scroll_y = d.choice_selected - max_lines + 1;
+                                                          redraw(&d);
+                                                      }
+                                                  }
                                               }
                                               break;
                                           }
@@ -656,6 +847,11 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   }
 
                                   if (d.type == DIALOG_ENTRY && d.result == 0) printf("%s\n", d.entry_buf);
+                                  if (d.type == DIALOG_CHOICE && d.result == 0) printf("%d\n", d.choice_selected + 1);
+
+                                  /* Liberar recursos XIM/XIC */
+                                  if (d.xic) XDestroyIC(d.xic);
+                                  if (d.xim) XCloseIM(d.xim);
 
                                   XftDrawDestroy(d.xft_draw);
                                   XftFontClose(d.dpy, d.xft_font);
@@ -666,5 +862,9 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   XFreeGC(d.dpy, d.gc);
                                   XDestroyWindow(d.dpy, d.win);
                                   XCloseDisplay(d.dpy);
+
+                                  for (int i = 0; i < d.num_options; i++) free(d.options[i]);
+                                  free(d.options);
+
                                   return d.result;
                               }
