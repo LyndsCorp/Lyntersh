@@ -483,7 +483,7 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                               }
 
                               int main(int argc, char *argv[]) {
-                                  setlocale(LC_ALL, "");   /* necesario para XIM y entrada UTF-8 */
+                                  setlocale(LC_ALL, "");
                                   Dialog d;
                                   memset(&d, 0, sizeof(d));
                                   d.type = -1;
@@ -614,7 +614,15 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   attr.background_pixel = d.clr_bg.pixel;
                                   d.win = XCreateWindow(d.dpy, RootWindow(d.dpy, d.screen), 0, 0, d.width, d.height, 1,
                                                         d.depth, InputOutput, d.vis, CWBackPixel, &attr);
-                                  XStoreName(d.dpy, d.win, d.title);
+
+                                  /* Establecer título de ventana UTF-8 */
+                                  Atom utf8_string = XInternAtom(d.dpy, "UTF8_STRING", False);
+                                  Atom net_wm_name = XInternAtom(d.dpy, "_NET_WM_NAME", False);
+                                  Atom wm_name_atom = XInternAtom(d.dpy, "WM_NAME", False);
+                                  XChangeProperty(d.dpy, d.win, net_wm_name, utf8_string, 8,
+                                                  PropModeReplace, (unsigned char*)d.title, strlen(d.title));
+                                  XChangeProperty(d.dpy, d.win, wm_name_atom, utf8_string, 8,
+                                                  PropModeReplace, (unsigned char*)d.title, strlen(d.title));
 
                                   XClassHint class_hint = {0};
                                   class_hint.res_name = d.wm_class; class_hint.res_class = d.wm_class;
@@ -773,7 +781,7 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                           case KeyPress: {
                                               if (XFilterEvent(&ev, d.win)) break;
 
-                                              char buf[32] = {0};  /* suficiente para cualquier carácter UTF-8 */
+                                              char buf[32] = {0};
                                               KeySym ks;
                                               int len = Xutf8LookupString(d.xic, &ev.xkey, buf, sizeof(buf), &ks, NULL);
                                               if (d.type == DIALOG_ENTRY) {
@@ -849,7 +857,6 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   if (d.type == DIALOG_ENTRY && d.result == 0) printf("%s\n", d.entry_buf);
                                   if (d.type == DIALOG_CHOICE && d.result == 0) printf("%d\n", d.choice_selected + 1);
 
-                                  /* Liberar recursos XIM/XIC */
                                   if (d.xic) XDestroyIC(d.xic);
                                   if (d.xim) XCloseIM(d.xim);
 
