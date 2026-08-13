@@ -1,7 +1,7 @@
 /*
  * Lyntersh - Algo parecido a Zenity pero más ligero y limitado, con Xlib, Xft (UTF-8), temas, icono PNG y colores
  * Compilar: gcc -o lyntersh lyntersh.c $(pkg-config --cflags --libs xft fontconfig freetype2) -lX11 -lpng -lm -O2
- * Copyright (C) Lynds Corp.
+ * Copyright (C) 2026 David Baña Szymaniak
  * Escrito por David Baña Szymaniak
  * MIT License
 */
