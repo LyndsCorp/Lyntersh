@@ -569,7 +569,7 @@ static void draw_rounded_rect(Dialog *d, int x, int y, int w, int h,
                                   }
 
                                   if (d.type == -1) {
-                                      fprintf(stderr, "Lyntesh: una interramienta de GUI simple para scripts.\n\nEscribe lyntersh --help para recibir ayuda.\n\nCopyright (C) 2026 David Baña Szymaniak.\nMIT License: ¡Es de código abierto!\n\nEscrito por David Baña Szymaniak para Lynds Corp.\n\n¡Espero que te guste!\n");
+                                      fprintf(stderr, "Lyntesh: una herramienta de GUI simple para scripts.\n\nEscribe lyntersh --help para recibir ayuda.\n\nCopyright (C) 2026 David Baña Szymaniak.\nMIT License: ¡Es de código abierto!\n\nEscrito por David Baña Szymaniak para Lynds Corp.\n\n¡Espero que te guste!\n");
                                       return 1;
                                   }
                                   if (d.type == DIALOG_CHOICE && num_choice == 0) {
